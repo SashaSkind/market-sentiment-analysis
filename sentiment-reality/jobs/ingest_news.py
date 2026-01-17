@@ -1,74 +1,156 @@
-import feedparser
-from datetime import datetime, timedelta, timezone
-from typing import List
 import requests
-import re
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any
+import os
 from newspaper import Article
+import yfinance as yf
 
 
-def get_news_urls(stock_symbol: str) -> List[str]:
+def get_stock_price_data(stock_symbol: str) -> Dict[str, Any]:
     """
-    Fetch article URLs from Google News RSS feed for a given stock symbol
-    from the last 7 days.
+    Fetch current stock price and related data using yfinance.
     
     Args:
         stock_symbol (str): Stock ticker symbol (e.g., 'AAPL', 'GOOGL')
     
     Returns:
-        List[str]: List of article URLs from the last 7 days
+        Dict containing:
+            - current_price (float): Current stock price
+            - price_timestamp (str): ISO format timestamp of price
+            - price_change (float): Dollar change from previous close
+            - price_direction (str): 'up', 'down', or 'neutral'
     """
-    # Google News RSS feed URL for the stock symbol
-    rss_url = f"https://news.google.com/rss/search?q={stock_symbol}&hl=en-US&gl=US&ceid=US:en"
+    try:
+        ticker = yf.Ticker(stock_symbol)
+        info = ticker.info
+        
+        current_price = info.get('currentPrice') or info.get('regularMarketPrice')
+        previous_close = info.get('previousClose')
+        
+        if not current_price:
+            return {
+                'current_price': None,
+                'price_timestamp': datetime.now(timezone.utc).isoformat(),
+                'price_change': None,
+                'price_direction': 'unknown'
+            }
+        
+        # Calculate price change
+        price_change = None
+        price_direction = 'neutral'
+        
+        if previous_close:
+            price_change = round(current_price - previous_close, 2)
+            if price_change > 0:
+                price_direction = 'up'
+            elif price_change < 0:
+                price_direction = 'down'
+        
+        return {
+            'current_price': round(current_price, 2),
+            'price_timestamp': datetime.now(timezone.utc).isoformat(),
+            'price_change': price_change,
+            'price_direction': price_direction
+        }
     
-    # Calculate the date threshold (7 days ago)
-    seven_days_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    except Exception as e:
+        print(f"Error fetching stock price for {stock_symbol}: {e}")
+        return {
+            'current_price': None,
+            'price_timestamp': datetime.now(timezone.utc).isoformat(),
+            'price_change': None,
+            'price_direction': 'unknown'
+        }
+
+
+def get_news_data(stock_symbol: str, hours: int = 168) -> List[Dict[str, Any]]:
+    """
+    Fetch article information from NewsAPI for a given stock symbol from the specified timeframe.
     
-    urls = []
+    Args:
+        stock_symbol (str): Stock ticker symbol (e.g., 'AAPL', 'GOOGL')
+        hours (int): Number of hours to look back for articles (default: 168 = 7 days)
+    
+    Returns:
+        List[Dict]: List of dictionaries containing:
+            - url (str): Article URL
+            - headline (str): Article title/headline
+            - source (str): News source name
+            - published_at (str): ISO format publication date
+            - stock_symbol (str): The stock symbol searched
+            - current_price (float): Stock price at time of fetch
+            - price_timestamp (str): ISO format timestamp of price
+            - price_change (float): Dollar change from previous close
+            - price_direction (str): 'up', 'down', or 'neutral'
+    
+    Note:
+        Requires NEWSAPI_KEY environment variable to be set.
+        Get a free API key from https://newsapi.org/
+    """
+    # Get stock price data
+    price_data = get_stock_price_data(stock_symbol)
+    
+    # Get API key from environment
+    api_key = os.getenv('NEWSAPI_KEY')
+    if not api_key:
+        print("Error: NEWSAPI_KEY environment variable not set")
+        print("Get a free API key from https://newsapi.org/")
+        return []
+    
+    # NewsAPI endpoint
+    api_url = "https://newsapi.org/v2/everything"
+    
+    # Calculate the date threshold based on hours parameter
+    timeframe_start = (datetime.now(timezone.utc) - timedelta(hours=hours)).date().isoformat()
+    
+    articles_info = []
     
     try:
-        # Parse the RSS feed
-        feed = feedparser.parse(rss_url)
+        # Parameters for the API request
+        params = {
+            'q': stock_symbol,  # Search for the stock symbol
+            'from': timeframe_start,  # From specified hours ago
+            'sortBy': 'publishedAt',  # Sort by published date
+            'language': 'en',  # English only
+            'apiKey': api_key
+        }
         
-        # Iterate through feed entries
-        for entry in feed.entries:
-            try:
-                # Try to get the published date
-                published_date = None
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    published_date = datetime(*entry.published_parsed[:6])
-                
-                # If we have a date, check if it's within the last 7 days
-                if published_date and published_date < seven_days_ago:
-                    continue
-                
-                # Try to get the source publication URL
-                url = None
-                
-                # First, try to extract from the summary (it may contain the source link)
-                if hasattr(entry, 'summary') and entry.summary:
-                    # Look for any http(s) URL in the summary that isn't a Google News URL
-                    matches = re.findall(r'https?://(?!news\.google\.com)[^\s"<>]+', entry.summary)
-                    if matches:
-                        url = matches[0]
-                
-                # If not found in summary, check if there's a source href
-                if not url and hasattr(entry, 'source') and hasattr(entry.source, 'href'):
-                    url = entry.source.href
-                
-                # Fallback to Google News URL if nothing else works
-                if not url and hasattr(entry, 'link') and entry.link:
-                    url = entry.link
-                
-                if url:
-                    urls.append(url)
-                    
-            except Exception:
-                continue
+        # Make the request
+        response = requests.get(api_url, params=params, timeout=10)
+        response.raise_for_status()
         
-    except Exception as e:
-        print(f"Error fetching RSS feed for {stock_symbol}: {e}")
+        # Parse the response
+        data = response.json()
+        
+        # Check if the request was successful
+        if data.get('status') != 'ok':
+            print(f"Error from NewsAPI: {data.get('message', 'Unknown error')}")
+            return []
+        
+        # Extract article information
+        articles = data.get('articles', [])
+        for article in articles:
+            article_url = article.get('url')
+            if article_url:
+                article_info = {
+                    'url': article_url,
+                    'headline': article.get('title', ''),
+                    'source': article.get('source', {}).get('name', 'Unknown'),
+                    'published_at': article.get('publishedAt', ''),
+                    'stock_symbol': stock_symbol,
+                    'current_price': price_data['current_price'],
+                    'price_timestamp': price_data['price_timestamp'],
+                    'price_change': price_data['price_change'],
+                    'price_direction': price_data['price_direction']
+                }
+                articles_info.append(article_info)
     
-    return urls
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching articles from NewsAPI: {e}")
+    except Exception as e:
+        print(f"Error processing NewsAPI response: {e}")
+    
+    return articles_info
 
 
 def get_article_text(url: str) -> str:
@@ -103,21 +185,35 @@ def get_article_text(url: str) -> str:
 if __name__ == "__main__":
     # Example usage
     symbol = "AAPL"
-    urls = get_news_urls(symbol)
-    print(f"Found {len(urls)} articles for {symbol}")
-    print()
+    articles = get_news_data(symbol)
     
-    # Test get_article_text with the first few URLs
-    for i, url in enumerate(urls[:3]):
+    if not articles:
+        print("No articles found. Make sure NEWSAPI_KEY environment variable is set.")
+        print("Get a free API key from https://newsapi.org/")
+        exit(1)
+    
+    print(f"Found {len(articles)} articles for {symbol}\n")
+    
+    # Test get_article_text with the first few articles
+    extracted_count = 0
+    for i, article in enumerate(articles[:5]):
         print(f"Article {i + 1}:")
+        print(f"  Headline: {article['headline']}")
+        print(f"  Source: {article['source']}")
+        print(f"  Published: {article['published_at']}")
+        print(f"  Current Price: ${article['current_price']}")
+        print(f"  Price Change: {article['price_change']} ({article['price_direction']})")
+        print(f"  URL: {article['url']}")
         print("-" * 80)
-        text = get_article_text(url)
+        text = get_article_text(article['url'])
         if text:
-            # Print first 300 characters of the article
-            preview = text[:300] + "..." if len(text) > 300 else text
-            print(preview)
+            # Print the entire article text
+            print(text)
+            extracted_count += 1
         else:
             print("Could not extract article text")
         print()
         print("=" * 80)
         print()
+    
+    print(f"\nSuccessfully extracted {extracted_count} out of {min(5, len(articles))} articles")
