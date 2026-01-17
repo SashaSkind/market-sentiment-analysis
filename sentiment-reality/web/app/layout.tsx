@@ -1,6 +1,5 @@
 import type { Metadata } from 'next'
-// TODO: Uncomment when ready to add styling
-// import '@/styles/globals.css'
+import '@/styles/globals.css'
 
 export const metadata: Metadata = {
   title: 'Sentiment Reality | Market Sentiment Analysis',
