@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS items (
     title TEXT NOT NULL,
     url TEXT NOT NULL,
     snippet TEXT NULL,
+    current_price DOUBLE PRECISION NULL,
+    price_timestamp TIMESTAMPTZ NULL,
+    price_change DOUBLE PRECISION NULL,
+    price_direction TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT unique_items_source_url UNIQUE (source, url)
 );
