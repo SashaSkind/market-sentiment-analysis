@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
-// TODO: Uncomment when ready to add styling
-// import '@/styles/globals.css'
+import '@/styles/globals.css'
+import MuiProviders from '@/theme/MuiProviders'
 
 export const metadata: Metadata = {
   title: 'Sentiment Reality | Market Sentiment Analysis',
@@ -15,9 +15,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        {/* TODO: Add header with navigation */}
-        {/* TODO: Add footer */}
-        <main>{children}</main>
+        <MuiProviders>
+          <main>{children}</main>
+        </MuiProviders>
       </body>
     </html>
   )

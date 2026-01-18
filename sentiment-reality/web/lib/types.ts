@@ -55,6 +55,18 @@ export interface DailyDataPoint {
   metric?: WindowMetric | null
 }
 
+// ========== Headlines ==========
+export interface NewsItem {
+  id?: string
+  title: string
+  source?: string | null
+  published_at?: string | null
+  sentiment_label?: SentimentLabel | null
+  confidence?: number | null
+  snippet?: string | null
+  url?: string | null
+}
+
 // ========== Dashboard Response ==========
 export interface DashboardData {
   ticker: string
