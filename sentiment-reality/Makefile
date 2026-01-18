@@ -7,11 +7,12 @@
 #   make get       - One-time setup (install deps)
 #   make run       - Run frontend + backend dev servers
 #   make worker    - Run background job worker
-#   make refresh ticker=TSLA - Trigger stock refresh
+#   make daily     - Run daily update for all tickers
+#   make refresh ticker=TSLA - Refresh single ticker
 #   make help      - Show available commands
 # ============================================
 
-.PHONY: get run worker refresh help frontend backend stop
+.PHONY: get run worker refresh help frontend backend stop daily worker-once bootstrap dashboard-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -42,7 +43,8 @@ get:
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Copy .env.example to .env and add your credentials"
-	@echo "  2. Run 'make run' to start development servers"
+	@echo "  2. Run 'make bootstrap' to setup default watchlist"
+	@echo "  3. Run 'make run' to start development servers"
 
 # ============================================
 # run - Run frontend + backend dev servers
@@ -80,9 +82,8 @@ backend:
 	. api/.venv/bin/activate && cd api && uvicorn main:app --reload --port 8000
 
 # ============================================
-# worker - Run the background job worker
+# worker - Run the background job worker (loop)
 # ============================================
-# For testing ingestion/sentiment/aggregation locally
 worker:
 	@echo "⚙️  Starting background job worker..."
 	@echo "Worker will poll for tasks and process them"
@@ -91,7 +92,22 @@ worker:
 	. api/.venv/bin/activate && cd jobs && python worker.py
 
 # ============================================
-# refresh - Trigger manual stock refresh
+# worker-once - Process ONE task from queue
+# ============================================
+worker-once:
+	@echo "⚙️  Processing one task from queue..."
+	. api/.venv/bin/activate && cd jobs && python run_local.py worker-once
+
+# ============================================
+# daily - Run DAILY_UPDATE_ALL locally
+# ============================================
+# Runs full pipeline for all active tickers
+daily:
+	@echo "📅 Running daily update for all tickers..."
+	. api/.venv/bin/activate && cd jobs && python run_local.py daily
+
+# ============================================
+# refresh - Run REFRESH_STOCK locally
 # ============================================
 # Usage: make refresh ticker=TSLA
 refresh:
@@ -101,11 +117,42 @@ ifndef ticker
 	@echo "Usage: make refresh ticker=TSLA"
 	@exit 1
 else
-	@echo "🔄 Triggering refresh for $(ticker)..."
-	@curl -s -X POST http://localhost:8000/stocks/refresh \
+	@echo "🔄 Running refresh for $(ticker)..."
+	. api/.venv/bin/activate && cd jobs && python run_local.py refresh $(ticker)
+endif
+
+# ============================================
+# refresh-api - Trigger refresh via API
+# ============================================
+# Usage: make refresh-api ticker=TSLA
+refresh-api:
+ifndef ticker
+	@echo "❌ Error: ticker is required"
+	@echo ""
+	@echo "Usage: make refresh-api ticker=TSLA"
+	@exit 1
+else
+	@echo "🔄 Triggering API refresh for $(ticker)..."
+	@curl -s -X POST http://localhost:8000/api/stocks/refresh \
 		-H "Content-Type: application/json" \
 		-d '{"ticker": "$(ticker)"}' | python3 -m json.tool || echo "Failed - is the backend running?"
 endif
+
+# ============================================
+# bootstrap - Setup default watchlist
+# ============================================
+bootstrap:
+	@echo "🏁 Bootstrapping default watchlist..."
+	. api/.venv/bin/activate && cd jobs && python bootstrap_watchlist.py
+
+# ============================================
+# dashboard-test - Test dashboard endpoint
+# ============================================
+# Usage: make dashboard-test ticker=TSLA period=90
+dashboard-test:
+	@echo "📊 Testing dashboard endpoint..."
+	@curl -s "http://localhost:8000/api/dashboard?ticker=$(or $(ticker),TSLA)&period=$(or $(period),90)" | head -c 1000
+	@echo ""
 
 # ============================================
 # add - Add a new stock to track
@@ -119,7 +166,7 @@ ifndef ticker
 	@exit 1
 else
 	@echo "➕ Adding $(ticker) to tracked stocks..."
-	@curl -s -X POST http://localhost:8000/stocks \
+	@curl -s -X POST http://localhost:8000/api/stocks \
 		-H "Content-Type: application/json" \
 		-d '{"ticker": "$(ticker)"}' | python3 -m json.tool || echo "Failed - is the backend running?"
 endif
@@ -141,16 +188,25 @@ help:
 	@echo ""
 	@echo "Setup:"
 	@echo "  make get              Install all dependencies (run once)"
+	@echo "  make bootstrap        Setup default watchlist (TSLA,NVDA,JPM,PFE,GME)"
 	@echo ""
 	@echo "Development:"
 	@echo "  make run              Run frontend + backend together"
 	@echo "  make frontend         Run only frontend (port 3000)"
 	@echo "  make backend          Run only backend (port 8000)"
-	@echo "  make worker           Run background job worker"
 	@echo ""
-	@echo "Stock Management:"
-	@echo "  make add ticker=TSLA      Add stock to track (backfill)"
-	@echo "  make refresh ticker=TSLA  Refresh stock data"
+	@echo "Pipeline (local, bypasses queue):"
+	@echo "  make daily            Run daily update for all active tickers"
+	@echo "  make refresh ticker=TSLA  Refresh single ticker directly"
+	@echo ""
+	@echo "Worker (task queue):"
+	@echo "  make worker           Run worker loop (polls for tasks)"
+	@echo "  make worker-once      Process ONE task from queue"
+	@echo ""
+	@echo "API (requires backend running):"
+	@echo "  make add ticker=TSLA      Add stock via API"
+	@echo "  make refresh-api ticker=TSLA  Queue refresh via API"
+	@echo "  make dashboard-test ticker=TSLA period=90  Test dashboard"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  make health           Check if backend is running"

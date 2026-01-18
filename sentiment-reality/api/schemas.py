@@ -70,3 +70,21 @@ class TaskResponse(BaseModel):
     queued: bool
     task_type: str
     ticker: str
+    task_id: Optional[str] = None
+
+
+# ========== Headlines ==========
+class NewsItem(BaseModel):
+    id: Optional[str] = None
+    title: str
+    source: Optional[str] = None
+    published_at: Optional[str] = None
+    sentiment_label: Optional[str] = None
+    confidence: Optional[float] = None
+    snippet: Optional[str] = None
+    url: Optional[str] = None
+
+
+# ========== Extended Dashboard (with headlines) ==========
+class DashboardDataWithHeadlines(DashboardData):
+    headlines: list[NewsItem] = []

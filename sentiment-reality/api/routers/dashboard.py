@@ -2,26 +2,33 @@
 from fastapi import APIRouter, Query
 from datetime import date, timedelta
 from schemas import (
-    DashboardData, DailyDataPoint, PricePoint, DailySentiment,
-    WindowMetric, SentimentSummary, PriceSummary, AlignmentSummary
+    DashboardData, DashboardDataWithHeadlines, DailyDataPoint, PricePoint, DailySentiment,
+    WindowMetric, SentimentSummary, PriceSummary, AlignmentSummary, NewsItem
 )
 
 router = APIRouter()
 
 # Try to import db, fall back to mock data if DB not configured
 try:
-    from db import query
+    from db import query, is_configured
     DB_AVAILABLE = True
 except Exception:
     DB_AVAILABLE = False
+    def is_configured():
+        return False
 
-@router.get("/dashboard", response_model=DashboardData)
-def get_dashboard(ticker: str = Query("SPY"), period: int = Query(90)):
+
+@router.get("/api/dashboard", response_model=DashboardDataWithHeadlines)
+@router.get("/dashboard", response_model=DashboardDataWithHeadlines, include_in_schema=False)
+def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
     """
     Get dashboard data for a ticker.
-    Reads from DB only: prices_daily, daily_agg, metrics_windowed.
+    Reads from DB only: prices_daily, daily_agg, metrics_windowed, items + item_scores.
+    Never calls external APIs or ML models.
     """
-    if not DB_AVAILABLE:
+    ticker = ticker.upper()
+
+    if not DB_AVAILABLE or not is_configured():
         return _mock_dashboard(ticker, period)
 
     try:
@@ -53,6 +60,24 @@ def get_dashboard(ticker: str = Query("SPY"), period: int = Query(90)):
             WHERE ticker = %s AND window_days = 7 AND date_end >= %s
             ORDER BY date_end ASC
         """, (ticker, start_date))
+
+        # Fetch recent headlines with scores
+        headlines_raw = query("""
+            SELECT
+                i.id::text,
+                i.title,
+                i.source,
+                i.published_at,
+                s.sentiment_label,
+                s.confidence,
+                i.snippet,
+                i.url
+            FROM items i
+            LEFT JOIN item_scores s ON i.id = s.item_id AND s.model = 'hf_fin_v1'
+            WHERE i.ticker = %s
+            ORDER BY i.published_at DESC
+            LIMIT 20
+        """, (ticker,))
 
         # Build daily_data by joining on date
         prices_by_date = {str(p["date"]): p for p in prices}
@@ -93,23 +118,40 @@ def get_dashboard(ticker: str = Query("SPY"), period: int = Query(90)):
                 ) if m else None
             ))
 
+        # Build headlines list
+        headlines = []
+        for h in headlines_raw:
+            headlines.append(NewsItem(
+                id=h.get("id"),
+                title=h.get("title", "No title"),
+                source=h.get("source"),
+                published_at=str(h["published_at"]) if h.get("published_at") else None,
+                sentiment_label=h.get("sentiment_label"),
+                confidence=float(h["confidence"]) if h.get("confidence") else None,
+                snippet=h.get("snippet"),
+                url=h.get("url"),
+            ))
+
         # Compute summaries
         sentiment_summary = _compute_sentiment_summary(sentiments)
         price_summary = _compute_price_summary(prices)
         alignment_summary = _compute_alignment_summary(metrics)
 
-        return DashboardData(
+        return DashboardDataWithHeadlines(
             ticker=ticker,
             period=period,
             sentiment_summary=sentiment_summary,
             price_summary=price_summary,
             alignment=alignment_summary,
-            daily_data=daily_data
+            daily_data=daily_data,
+            headlines=headlines,
         )
 
     except Exception as e:
         # Fall back to mock if DB query fails
         print(f"DB error: {e}")
+        import traceback
+        traceback.print_exc()
         return _mock_dashboard(ticker, period)
 
 
@@ -183,14 +225,13 @@ def _compute_alignment_summary(metrics: list) -> AlignmentSummary:
     )
 
 
-def _mock_dashboard(ticker: str, period: int) -> DashboardData:
+def _mock_dashboard(ticker: str, period: int) -> DashboardDataWithHeadlines:
     """Return mock data when DB is not available."""
-    # Generate mock daily data for the period
     from datetime import date, timedelta
     import random
 
     daily_data = []
-    base_price = {"SPY": 450, "TSLA": 245, "AAPL": 185}.get(ticker, 100)
+    base_price = {"SPY": 450, "TSLA": 245, "AAPL": 185, "NVDA": 520, "JPM": 195, "PFE": 28, "GME": 22}.get(ticker, 100)
 
     for i in range(min(period, 14)):
         d = (date.today() - timedelta(days=period-i-1)).isoformat()
@@ -217,7 +258,28 @@ def _mock_dashboard(ticker: str, period: int) -> DashboardData:
             )
         ))
 
-    return DashboardData(
+    # Mock headlines
+    headlines = [
+        NewsItem(
+            id="mock-1",
+            title=f"{ticker} shares move on earnings sentiment",
+            source="MockNews",
+            published_at=date.today().isoformat(),
+            sentiment_label="POSITIVE",
+            confidence=0.85,
+            snippet="Mock headline for demo purposes."
+        ),
+        NewsItem(
+            id="mock-2",
+            title=f"Analysts discuss {ticker} outlook",
+            source="MockAnalysis",
+            published_at=(date.today() - timedelta(days=1)).isoformat(),
+            sentiment_label="NEUTRAL",
+            confidence=0.72,
+        ),
+    ]
+
+    return DashboardDataWithHeadlines(
         ticker=ticker,
         period=period,
         sentiment_summary=SentimentSummary(
@@ -234,5 +296,6 @@ def _mock_dashboard(ticker: str, period: int) -> DashboardData:
             misalignment_days=random.randint(1, 5),
             interpretation=random.choice(["Aligned", "Noisy", "Misleading"])
         ),
-        daily_data=daily_data
+        daily_data=daily_data,
+        headlines=headlines,
     )

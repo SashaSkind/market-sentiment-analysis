@@ -2,218 +2,270 @@
 Task worker - polls tasks table and executes jobs.
 
 Task types:
-- BACKFILL_STOCK: Full backfill for a ticker (90 days)
-- REFRESH_STOCK: Refresh recent data for a ticker (2-3 days)
-- DAILY_UPDATE_ALL: Enqueue REFRESH_STOCK for all active tickers
+- DAILY_UPDATE_ALL: Run full pipeline for all active tickers
+- REFRESH_STOCK: Refresh data for a single ticker (user-triggered)
+- BACKFILL_STOCK: Full backfill (treated same as REFRESH with larger params)
+
+Safe claiming uses FOR UPDATE SKIP LOCKED to prevent double-processing.
 """
 import time
-from db import query, execute, get_connection
-from providers.prices import fetch_daily_prices
-from ingest_to_db import ingest_news_to_db
-from score_unscored_items import score_unscored_items as run_scoring
-from compute.aggregate_daily import compute_daily_aggregates
-from compute.metrics import compute_metrics
+import json
+from db import fetch_all, execute, get_connection
+from pipeline import run_pipeline_for_ticker
+
+# Default parameters for each task type
+DAILY_PARAMS = {
+    "news_hours": 48,
+    "score_limit": 200,
+    "prices_days": 180,
+    "agg_days": 90,
+    "metrics_days": 90,
+    "window_days": 7,
+}
+
+REFRESH_PARAMS = {
+    "news_hours": 48,
+    "score_limit": 50,
+    "prices_days": 180,
+    "agg_days": 30,
+    "metrics_days": 30,
+    "window_days": 7,
+}
+
+MAX_ATTEMPTS = 3
 
 
-def claim_next_task():
+def claim_next_task() -> dict | None:
     """
     Claim the next pending task using FOR UPDATE SKIP LOCKED.
     Returns task dict or None if no tasks available.
+
+    Uses atomic CTE to claim in a single query.
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
+            # Atomic claim using CTE
             cur.execute("""
-                SELECT id, task_type, ticker, payload, attempts
-                FROM tasks
-                WHERE status = 'PENDING'
-                ORDER BY priority DESC, created_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
+                WITH next AS (
+                    SELECT id
+                    FROM tasks
+                    WHERE status = 'PENDING'
+                    ORDER BY priority DESC, created_at ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE tasks t
+                SET status = 'RUNNING', attempts = attempts + 1, updated_at = now()
+                FROM next
+                WHERE t.id = next.id
+                RETURNING t.id, t.task_type, t.ticker, t.payload, t.attempts
             """)
             row = cur.fetchone()
+            conn.commit()
+
             if not row:
                 return None
 
             task_id, task_type, ticker, payload, attempts = row
 
-            # Mark as RUNNING
-            cur.execute("""
-                UPDATE tasks
-                SET status = 'RUNNING', attempts = attempts + 1, updated_at = now()
-                WHERE id = %s
-            """, (task_id,))
-            conn.commit()
-
             return {
-                "id": task_id,
+                "id": str(task_id),
                 "task_type": task_type,
                 "ticker": ticker,
-                "payload": payload,
-                "attempts": attempts + 1,
+                "payload": payload or {},
+                "attempts": attempts,
             }
 
 
-def complete_task(task_id: str, error: str = None):
-    """Mark task as DONE or ERROR."""
+def complete_task(task_id: str, result: dict = None, error: str = None):
+    """Mark task as DONE or ERROR with optional result/error info."""
     if error:
         execute("""
             UPDATE tasks
-            SET status = 'ERROR', error = %s, updated_at = now()
+            SET status = 'ERROR',
+                error = %s,
+                updated_at = now()
             WHERE id = %s
-        """, (error[:500], task_id))
+        """, (error[:1000], task_id))
     else:
-        execute("""
-            UPDATE tasks
-            SET status = 'DONE', updated_at = now()
-            WHERE id = %s
-        """, (task_id,))
+        # Store result in payload if provided
+        if result:
+            execute("""
+                UPDATE tasks
+                SET status = 'DONE',
+                    payload = COALESCE(payload, '{}'::jsonb) || %s,
+                    updated_at = now()
+                WHERE id = %s
+            """, (json.dumps({"result": result}), task_id))
+        else:
+            execute("""
+                UPDATE tasks
+                SET status = 'DONE',
+                    updated_at = now()
+                WHERE id = %s
+            """, (task_id,))
 
 
-def handle_backfill_stock(ticker: str):
-    """Full backfill for a ticker: prices, news, scores, aggregates, metrics."""
-    print(f"=== BACKFILL_STOCK: {ticker} ===")
+def handle_daily_update_all(task: dict) -> dict:
+    """
+    DAILY_UPDATE_ALL: Run full pipeline for all active tickers.
 
-    # 1. Fetch and store prices
-    print("Fetching prices...")
-    prices = fetch_daily_prices(ticker, days=90)
-    store_prices(ticker, prices)
-    compute_returns(ticker)
+    Does NOT enqueue separate tasks - runs pipeline directly for each ticker.
+    """
+    print("\n" + "=" * 60)
+    print("DAILY_UPDATE_ALL: Processing all active tickers")
+    print("=" * 60)
 
-    # 2. Fetch and store news
-    print("Fetching and storing news...")
-    result = ingest_news_to_db(ticker, hours=168 * 13)  # ~90 days
-    print(f"  Ingested {result['inserted_count']} articles")
+    # Get active tickers
+    tickers = fetch_all(
+        "SELECT ticker FROM tracked_stocks WHERE is_active = true ORDER BY ticker"
+    )
 
-    # 3. Score unscored items (using new module with full text + chunking)
-    print("Scoring items...")
-    result = run_scoring(ticker, limit=100)
-    print(f"  Scored {result['scored']}/{result['selected']} items")
+    if not tickers:
+        print("No active tickers found!")
+        return {"tickers_processed": 0, "results": {}}
 
-    # 4. Compute aggregates
-    print("Computing aggregates...")
-    compute_daily_aggregates(ticker)
+    # Get params from payload or use defaults
+    payload = task.get("payload", {})
+    params = {**DAILY_PARAMS, **payload}
 
-    # 5. Compute metrics
-    print("Computing metrics...")
-    compute_metrics(ticker, window_days=7)
-
-    print(f"=== BACKFILL_STOCK: {ticker} COMPLETE ===")
-
-
-def handle_refresh_stock(ticker: str):
-    """Refresh recent data for a ticker (last 3 days)."""
-    print(f"=== REFRESH_STOCK: {ticker} ===")
-
-    # 1. Fetch and store recent prices
-    prices = fetch_daily_prices(ticker, days=5)
-    store_prices(ticker, prices[-3:] if len(prices) >= 3 else prices)
-    compute_returns(ticker)
-
-    # 2. Fetch and store recent news
-    print("Fetching and storing news...")
-    result = ingest_news_to_db(ticker, hours=72)  # 3 days
-    print(f"  Ingested {result['inserted_count']} articles")
-
-    # 3. Score unscored items (using new module with full text + chunking)
-    print("Scoring items...")
-    result = run_scoring(ticker, limit=50)
-    print(f"  Scored {result['scored']}/{result['selected']} items")
-
-    # 4. Compute aggregates
-    compute_daily_aggregates(ticker)
-    compute_metrics(ticker, window_days=7)
-
-    print(f"=== REFRESH_STOCK: {ticker} COMPLETE ===")
-
-
-def handle_daily_update_all():
-    """Enqueue REFRESH_STOCK for all active tickers."""
-    print("=== DAILY_UPDATE_ALL ===")
-    tickers = query("SELECT ticker FROM tracked_stocks WHERE is_active = true")
+    results = {}
     for row in tickers:
-        execute("""
-            INSERT INTO tasks (task_type, ticker, priority, status)
-            VALUES ('REFRESH_STOCK', %s, 20, 'PENDING')
-        """, (row["ticker"],))
-        print(f"Enqueued REFRESH_STOCK for {row['ticker']}")
-    print("=== DAILY_UPDATE_ALL COMPLETE ===")
+        ticker = row["ticker"]
+        try:
+            result = run_pipeline_for_ticker(
+                ticker=ticker,
+                news_hours=params["news_hours"],
+                score_limit=params["score_limit"],
+                prices_days=params["prices_days"],
+                agg_days=params["agg_days"],
+                metrics_days=params["metrics_days"],
+                window_days=params["window_days"],
+            )
+            results[ticker] = {
+                "success": result["success"],
+                "elapsed": result["elapsed_seconds"],
+            }
+        except Exception as e:
+            print(f"Error processing {ticker}: {e}")
+            results[ticker] = {"success": False, "error": str(e)}
+
+    print("\n" + "=" * 60)
+    print(f"DAILY_UPDATE_ALL COMPLETE: {len(results)} tickers processed")
+    print("=" * 60)
+
+    return {"tickers_processed": len(results), "results": results}
 
 
-def store_prices(ticker: str, prices: list):
-    """Upsert prices into prices_daily."""
-    for p in prices:
-        execute("""
-            INSERT INTO prices_daily (ticker, date, open, high, low, close, adj_close, volume)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (ticker, date) DO UPDATE SET
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                adj_close = EXCLUDED.adj_close,
-                volume = EXCLUDED.volume
-        """, (ticker, p["date"], p["open"], p["high"], p["low"], p["close"], p["adj_close"], p["volume"]))
-    print(f"Stored {len(prices)} prices for {ticker}")
+def handle_refresh_stock(task: dict) -> dict:
+    """
+    REFRESH_STOCK: Refresh data for a single ticker.
+
+    Ticker comes from task.ticker or task.payload.ticker
+    """
+    ticker = task.get("ticker")
+    if not ticker:
+        ticker = task.get("payload", {}).get("ticker")
+
+    if not ticker:
+        raise ValueError("No ticker specified in task")
+
+    print(f"\n{'='*60}")
+    print(f"REFRESH_STOCK: {ticker}")
+    print(f"{'='*60}")
+
+    # Get params from payload or use defaults
+    payload = task.get("payload", {})
+    params = {**REFRESH_PARAMS, **payload}
+
+    result = run_pipeline_for_ticker(
+        ticker=ticker,
+        news_hours=params.get("news_hours", REFRESH_PARAMS["news_hours"]),
+        score_limit=params.get("score_limit", REFRESH_PARAMS["score_limit"]),
+        prices_days=params.get("prices_days", REFRESH_PARAMS["prices_days"]),
+        agg_days=params.get("agg_days", REFRESH_PARAMS["agg_days"]),
+        metrics_days=params.get("metrics_days", REFRESH_PARAMS["metrics_days"]),
+        window_days=params.get("window_days", REFRESH_PARAMS["window_days"]),
+    )
+
+    print(f"\n{'='*60}")
+    print(f"REFRESH_STOCK COMPLETE: {ticker}")
+    print(f"{'='*60}")
+
+    return result
 
 
-def compute_returns(ticker: str):
-    """Compute return_1d for prices."""
-    execute("""
-        UPDATE prices_daily p
-        SET return_1d = (p.close - prev.close) / prev.close * 100
-        FROM prices_daily prev
-        WHERE p.ticker = %s
-          AND prev.ticker = p.ticker
-          AND prev.date = p.date - INTERVAL '1 day'
-    """, (ticker,))
-
-
-def run_once():
-    """Process one task and return."""
+def run_once() -> bool:
+    """
+    Process one task and return.
+    Returns True if a task was processed, False if no tasks available.
+    """
     task = claim_next_task()
     if not task:
         return False
 
-    print(f"\nProcessing task: {task['task_type']} - {task['ticker']}")
+    task_id = task["id"]
+    task_type = task["task_type"]
+    attempts = task["attempts"]
+
+    print(f"\n[WORKER] Processing: {task_type}")
+    print(f"  Task ID: {task_id}")
+    print(f"  Ticker: {task.get('ticker', 'N/A')}")
+    print(f"  Attempt: {attempts}/{MAX_ATTEMPTS}")
 
     try:
-        if task["task_type"] == "BACKFILL_STOCK":
-            handle_backfill_stock(task["ticker"])
-        elif task["task_type"] == "REFRESH_STOCK":
-            handle_refresh_stock(task["ticker"])
-        elif task["task_type"] == "DAILY_UPDATE_ALL":
-            handle_daily_update_all()
+        if task_type == "DAILY_UPDATE_ALL":
+            result = handle_daily_update_all(task)
+        elif task_type == "REFRESH_STOCK":
+            result = handle_refresh_stock(task)
+        elif task_type == "BACKFILL_STOCK":
+            # Treat BACKFILL same as REFRESH but with larger limits
+            result = handle_refresh_stock(task)
         else:
-            raise ValueError(f"Unknown task type: {task['task_type']}")
+            raise ValueError(f"Unknown task type: {task_type}")
 
-        complete_task(task["id"])
-        print(f"Task {task['id']} completed successfully")
+        complete_task(task_id, result=result)
+        print(f"\n[WORKER] ✓ Task {task_id} completed successfully")
+        return True
 
     except Exception as e:
-        print(f"Task {task['id']} failed: {e}")
-        complete_task(task["id"], error=str(e))
+        error_msg = str(e)
+        print(f"\n[WORKER] ✗ Task {task_id} failed: {error_msg}")
 
-    return True
+        if attempts >= MAX_ATTEMPTS:
+            print(f"  Max attempts ({MAX_ATTEMPTS}) reached - marking as ERROR")
+            complete_task(task_id, error=error_msg)
+        else:
+            # Leave as ERROR, manual retry needed
+            complete_task(task_id, error=f"Attempt {attempts}: {error_msg}")
+
+        return True
 
 
 def run_loop(poll_interval: int = 10):
     """Continuously poll for tasks."""
-    print("Starting worker loop...")
+    print("=" * 60)
+    print("WORKER: Starting task loop")
+    print(f"  Poll interval: {poll_interval}s")
+    print("  Press Ctrl+C to stop")
+    print("=" * 60)
+
     while True:
         try:
             if not run_once():
-                print(f"No tasks, sleeping {poll_interval}s...")
+                print(f"[WORKER] No tasks, sleeping {poll_interval}s...")
                 time.sleep(poll_interval)
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            print("\n[WORKER] Shutting down...")
             break
         except Exception as e:
-            print(f"Worker error: {e}")
+            print(f"[WORKER] Error: {e}")
             time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         run_once()
     else:
