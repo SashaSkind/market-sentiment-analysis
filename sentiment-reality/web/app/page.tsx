@@ -1,15 +1,17 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Box, Button, Grid, Stack, Typography } from '@mui/material'
+import { Alert, Box, Button, Stack, Typography } from '@mui/material'
 import AppShell from '@/components/layout/AppShell'
-import PricePanel from '@/components/panels/PricePanel'
-import SentimentPanel from '@/components/panels/SentimentPanel'
-import AlignmentPanel from '@/components/panels/AlignmentPanel'
+import WatchlistSelector from '@/components/panels/WatchlistSelector'
+import NarrativeReliabilityPanel from '@/components/panels/NarrativeReliabilityPanel'
+import MisalignmentDaysPanel from '@/components/panels/MisalignmentDaysPanel'
+import WatchlistPanel from '@/components/panels/WatchlistPanel'
 import HeadlinesPanel from '@/components/panels/HeadlinesPanel'
 import AddStockModal from '@/components/modals/AddStockModal'
 import HeadlineDetailsModal from '@/components/modals/HeadlineDetailsModal'
 import MisalignmentMapModal from '@/components/modals/MisalignmentMapModal'
+import HeadlinesForDateModal from '@/components/modals/HeadlinesForDateModal'
 import { getDashboard, getStocks, refreshStock } from '@/lib/api'
 import type { DashboardData, NewsItem, Stock } from '@/lib/types'
 
@@ -24,6 +26,7 @@ export default function Home() {
   const [isAddStockOpen, setIsAddStockOpen] = useState(false)
   const [isMisalignmentOpen, setIsMisalignmentOpen] = useState(false)
   const [selectedHeadline, setSelectedHeadline] = useState<NewsItem | null>(null)
+  const [selectedMisalignmentDate, setSelectedMisalignmentDate] = useState<string | null>(null)
 
   // Get active tickers from stocks
   const tickers = useMemo(() => {
@@ -95,9 +98,6 @@ export default function Home() {
     }
   }
 
-  const sentimentScore = data?.sentiment_summary.current_score ?? null
-  const priceReturn = data?.price_summary.period_return ?? null
-  const alignmentScore = data?.alignment.score ?? null
   const coverage = data?.coverage
   const hasCoverageGap = coverage && coverage.sentiment_period_used < coverage.sentiment_period_requested
 
@@ -166,63 +166,66 @@ export default function Home() {
                 >
                   Export Weekly Brief
                 </Button>
+                <Button
+                  variant="outlined"
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  sx={{ borderRadius: 999 }}
+                >
+                  {isRefreshing ? 'Refreshing...' : 'Refresh'}
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => setIsAddStockOpen(true)}
+                  sx={{ borderRadius: 999 }}
+                >
+                  Add Stock
+                </Button>
               </Stack>
             </Stack>
           </Box>
 
-          <Box id="signals">
-            <Grid container spacing={3} alignItems="stretch">
-              <Grid size={{ xs: 12, md: 4 }}>
-                <SentimentPanel
-                  ticker={selectedTicker ?? ''}
-                  sentimentScore={sentimentScore}
-                  tags={[
-                    data?.alignment.interpretation ?? 'Unlabeled',
-                    data?.sentiment_summary.dominant_label ?? 'NEUTRAL',
-                    data?.sentiment_summary.trend ?? 'stable',
-                  ]}
-                  isLoading={isLoading}
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 4 }}>
-                <AlignmentPanel
-                  tickers={tickers}
-                  statusText={
-                    isRefreshing ? 'Refreshing...' : error ? 'API unavailable.' : data ? 'Ready' : 'Loading data...'
-                  }
-                  selectedTicker={selectedTicker ?? ''}
-                  selectedPrice={data?.price_summary.current_price ?? null}
-                  selectedSentiment={sentimentScore}
-                  priceReturn={priceReturn}
-                  onSelectTicker={(t) => t && setSelectedTicker(t)}
-                  isLoading={isLoading}
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 4 }}>
-                <PricePanel
-                  score={alignmentScore}
-                  interpretation={data?.alignment.interpretation ?? null}
-                  period={period}
-                  onPeriodChange={setPeriod}
-                  isLoading={isLoading}
-                />
-              </Grid>
-            </Grid>
-          </Box>
+          {/* Stock Selector */}
+          <WatchlistSelector
+            tickers={tickers}
+            selectedTicker={selectedTicker}
+            onTickerChange={setSelectedTicker}
+            isLoading={isLoading}
+          />
 
-          {/* Watchlist removed for now */}
+          {/* Primary Signal Box - Narrative Reliability */}
+          <NarrativeReliabilityPanel
+            score={data?.alignment.score}
+            interpretation={data?.alignment.interpretation}
+            misalignmentDays={data?.alignment.misalignment_days}
+            period={period}
+            onPeriodChange={setPeriod}
+            isLoading={isLoading}
+          />
 
-          <Box id="timeline">
-            <Grid container spacing={3}>
-              <Grid size={{ xs: 12 }}>
-                <HeadlinesPanel
-                  headlines={data?.headlines ?? []}
-                  isLoading={isLoading}
-                  onSelectHeadline={setSelectedHeadline}
-                />
-              </Grid>
-            </Grid>
-          </Box>
+          {/* Box 2: Where the Narrative Failed */}
+          <MisalignmentDaysPanel
+            misalignmentList={data?.alignment.misalignment_list ?? []}
+            onSelectDate={setSelectedMisalignmentDate}
+            isLoading={isLoading}
+          />
+
+          {/* Watchlist Panel */}
+          <WatchlistPanel
+            statusText={isRefreshing ? 'Refreshing...' : error ? 'API unavailable.' : data ? 'Ready' : 'Loading data...'}
+            selectedTicker={selectedTicker ?? ''}
+            selectedPrice={data?.price_summary.current_price ?? null}
+            selectedSentiment={data?.sentiment_summary.current_score ?? null}
+            priceReturn={data?.price_summary.period_return ?? null}
+            isLoading={isLoading}
+          />
+
+          {/* Box 3: Recent Articles */}
+          <HeadlinesPanel
+            headlines={data?.headlines ?? []}
+            isLoading={isLoading}
+            onSelectHeadline={setSelectedHeadline}
+          />
         </Stack>
       </AppShell>
 
@@ -241,6 +244,11 @@ export default function Home() {
         ticker={selectedTicker}
         period={period}
         data={data?.daily_data ?? []}
+      />
+      <HeadlinesForDateModal
+        ticker={selectedTicker}
+        date={selectedMisalignmentDate}
+        onClose={() => setSelectedMisalignmentDate(null)}
       />
     </>
   )
