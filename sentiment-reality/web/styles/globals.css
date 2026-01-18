@@ -1,4 +1,22 @@
-/* TODO: Uncomment when ready to add styling */
-/* @tailwind base; */
-/* @tailwind components; */
-/* @tailwind utilities; */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Space Grotesk', sans-serif;
+  background: linear-gradient(180deg, #3a78d6 0%, #1e4fb2 45%, #0b1d3a 100%);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
