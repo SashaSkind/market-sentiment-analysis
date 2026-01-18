@@ -67,7 +67,7 @@ def ingest_news_to_db(stock_symbol: str, hours: int = 168) -> dict:
                 article.get('headline', 'No title'),
                 article['url'],
                 article.get('snippet', ''),
-                article.get('current_price'),
+                article.get('price'),
                 article.get('price_timestamp'),
                 article.get('price_change'),
                 article.get('price_direction')

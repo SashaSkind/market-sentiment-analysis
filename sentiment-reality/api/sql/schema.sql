@@ -128,3 +128,19 @@ CREATE TABLE IF NOT EXISTS metrics_windowed (
 
 CREATE INDEX IF NOT EXISTS idx_metrics_ticker_end_window
     ON metrics_windowed(ticker, date_end, window_days);
+
+
+-- Add current_prices table for hourly stock price updates
+-- This table stores the most recent price for each tracked stock
+
+CREATE TABLE IF NOT EXISTS current_prices (
+    ticker TEXT PRIMARY KEY,
+    current_price DOUBLE PRECISION NOT NULL,
+    price_change DOUBLE PRECISION NULL,
+    price_direction TEXT NULL,  -- 'up', 'down', 'neutral', 'unknown'
+    price_timestamp TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_current_prices_updated_at
+    ON current_prices(updated_at DESC);

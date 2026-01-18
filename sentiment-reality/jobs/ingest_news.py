@@ -84,7 +84,7 @@ def get_news_data(stock_symbol: str, hours: int = 168) -> List[Dict[str, Any]]:
             - source (str): News source name
             - published_at (str): ISO format publication date
             - stock_symbol (str): The stock symbol searched
-            - current_price (float): Stock price at time of fetch
+            - price (float): Stock price at time of article publication
             - price_timestamp (str): ISO format timestamp of price
             - price_change (float): Dollar change from previous close
             - price_direction (str): 'up', 'down', or 'neutral'
@@ -93,9 +93,6 @@ def get_news_data(stock_symbol: str, hours: int = 168) -> List[Dict[str, Any]]:
         Requires NEWSAPI_KEY environment variable to be set.
         Get a free API key from https://newsapi.org/
     """
-    # Get stock price data
-    price_data = get_stock_price_data(stock_symbol)
-    
     # Get API key from environment
     api_key = os.getenv('NEWSAPI_KEY')
     if not api_key:
@@ -138,16 +135,49 @@ def get_news_data(stock_symbol: str, hours: int = 168) -> List[Dict[str, Any]]:
         for article in articles:
             article_url = article.get('url')
             if article_url:
+                published_at = article.get('publishedAt', '')
+                
+                # Extract date from published_at and get price for that date
+                try:
+                    published_date = published_at.split('T')[0] if published_at else ''
+                    ticker = yf.Ticker(stock_symbol)
+                    df = ticker.history(start=published_date, end=(datetime.fromisoformat(published_date) + timedelta(days=1)).strftime("%Y-%m-%d"))
+                    
+                    price = None
+                    price_change = None
+                    price_direction = 'unknown'
+                    
+                    if not df.empty:
+                        row = df.iloc[0]
+                        price = round(float(row['Close']), 2)
+                        
+                        # Get previous close for price change if available
+                        prev_df = ticker.history(start=(datetime.fromisoformat(published_date) - timedelta(days=5)).strftime("%Y-%m-%d"), end=published_date)
+                        if len(prev_df) > 1:
+                            prev_close = float(prev_df.iloc[-2]['Close'])
+                            price_change = round(price - prev_close, 2)
+                            if price_change > 0:
+                                price_direction = 'up'
+                            elif price_change < 0:
+                                price_direction = 'down'
+                            else:
+                                price_direction = 'neutral'
+                except Exception as e:
+                    print(f"Error fetching price for {stock_symbol} on {published_date}: {e}")
+                    price = None
+                    price_change = None
+                    price_direction = 'unknown'
+                
                 article_info = {
                     'url': article_url,
                     'headline': article.get('title', ''),
                     'source': article.get('source', {}).get('name', 'Unknown'),
-                    'published_at': article.get('publishedAt', ''),
+                    'published_at': published_at,
                     'stock_symbol': stock_symbol,
-                    'current_price': price_data['current_price'],
-                    'price_timestamp': price_data['price_timestamp'],
-                    'price_change': price_data['price_change'],
-                    'price_direction': price_data['price_direction']
+                    'price': price,
+                    'price_timestamp': published_at,
+                    'price_change': price_change,
+                    'price_direction': price_direction
                 }
                 articles_info.append(article_info)
     
@@ -207,7 +237,7 @@ if __name__ == "__main__":
         print(f"  Headline: {article['headline']}")
         print(f"  Source: {article['source']}")
         print(f"  Published: {article['published_at']}")
-        print(f"  Current Price: ${article['current_price']}")
+        print(f"  Price at Publication: ${article['price']}")
         print(f"  Price Change: {article['price_change']} ({article['price_direction']})")
         print(f"  URL: {article['url']}")
         print("-" * 80)
