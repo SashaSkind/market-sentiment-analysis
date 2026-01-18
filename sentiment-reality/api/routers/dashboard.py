@@ -20,7 +20,11 @@ except Exception:
 
 @router.get("/api/dashboard", response_model=DashboardDataWithHeadlines)
 @router.get("/dashboard", response_model=DashboardDataWithHeadlines, include_in_schema=False)
-def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
+def get_dashboard(
+    ticker: str = Query("TSLA"),
+    period: int = Query(30),
+    headlines_limit: int = Query(3, ge=1, le=20),
+):
     """
     Get dashboard data for a ticker.
     Reads from DB only: prices_daily, daily_agg, metrics_windowed, items + item_scores.
@@ -69,6 +73,7 @@ def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
                 i.source,
                 i.published_at,
                 s.sentiment_label,
+                s.sentiment_score,
                 s.confidence,
                 i.snippet,
                 i.url
@@ -76,8 +81,8 @@ def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
             LEFT JOIN item_scores s ON i.id = s.item_id AND s.model = 'hf_fin_v1'
             WHERE i.ticker = %s
             ORDER BY i.published_at DESC
-            LIMIT 20
-        """, (ticker,))
+            LIMIT %s
+        """, (ticker, headlines_limit))
 
         # Build daily_data by joining on date
         prices_by_date = {str(p["date"]): p for p in prices}
@@ -127,6 +132,7 @@ def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
                 source=h.get("source"),
                 published_at=str(h["published_at"]) if h.get("published_at") else None,
                 sentiment_label=h.get("sentiment_label"),
+                sentiment_score=float(h["sentiment_score"]) if h.get("sentiment_score") else None,
                 confidence=float(h["confidence"]) if h.get("confidence") else None,
                 snippet=h.get("snippet"),
                 url=h.get("url"),

@@ -62,6 +62,7 @@ export interface NewsItem {
   source?: string | null
   published_at?: string | null
   sentiment_label?: SentimentLabel | null
+  sentiment_score?: number | null
   confidence?: number | null
   snippet?: string | null
   url?: string | null

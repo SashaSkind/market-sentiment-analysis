@@ -80,6 +80,7 @@ class NewsItem(BaseModel):
     source: Optional[str] = None
     published_at: Optional[str] = None
     sentiment_label: Optional[str] = None
+    sentiment_score: Optional[float] = None
     confidence: Optional[float] = None
     snippet: Optional[str] = None
     url: Optional[str] = None
