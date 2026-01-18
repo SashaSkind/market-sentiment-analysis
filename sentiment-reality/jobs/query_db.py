@@ -12,7 +12,8 @@ def get_daily_summary(symbol: str, date: str) -> dict:
 		- yesterday_close: float or None
 		- yesterday_volume: int or None
 		- avg_sentiment: float or None
-		- article_count: int
+		- today_article_count: int
+        - yesterday_article_count: int
 
 	Args:
 		symbol: Stock ticker (e.g., 'TSLA')
