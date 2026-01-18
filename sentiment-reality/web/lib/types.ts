@@ -75,13 +75,20 @@ export interface DashboardData {
   price_summary: PriceSummary
   alignment: AlignmentSummary
   daily_data: DailyDataPoint[]
+  headlines: NewsItem[]
 }
 
 // ========== Stock Management ==========
+export interface Stock {
+  ticker: string
+  is_active: boolean
+}
+
 export interface TaskResponse {
   queued: boolean
   task_type: string
   ticker: string
+  task_id?: string | null
 }
 
 // ========== API Response Wrapper ==========

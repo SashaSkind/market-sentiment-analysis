@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Alert, Box, Button, Grid, Stack, Typography } from '@mui/material'
 import AppShell from '@/components/layout/AppShell'
 import PricePanel from '@/components/panels/PricePanel'
@@ -9,54 +9,25 @@ import AlignmentPanel from '@/components/panels/AlignmentPanel'
 import HeadlinesPanel from '@/components/panels/HeadlinesPanel'
 import AddStockModal from '@/components/modals/AddStockModal'
 import HeadlineDetailsModal from '@/components/modals/HeadlineDetailsModal'
-import { getDashboard, refreshStock } from '@/lib/api'
-import type { DashboardData, NewsItem } from '@/lib/types'
-
-const DEFAULT_TICKERS = ['AAPL', 'AMZN', 'MSFT', 'NVDA', 'TSLA']
-const SAMPLE_HEADLINES: NewsItem[] = [
-  {
-    id: '1',
-    title: 'Tesla sentiment cools as deliveries miss expectations',
-    source: 'MarketWire',
-    published_at: new Date().toISOString(),
-    sentiment_label: 'NEGATIVE',
-    confidence: 0.72,
-    snippet: 'Analysts highlighted softening demand signals across key regions.',
-  },
-  {
-    id: '2',
-    title: 'AI capex narrative boosts Nvidia chatter',
-    source: 'Tech Pulse',
-    published_at: new Date().toISOString(),
-    sentiment_label: 'POSITIVE',
-    confidence: 0.81,
-    snippet: 'Optimism around data center spend returned to headlines.',
-  },
-  {
-    id: '3',
-    title: 'Energy narrative flips bullish on supply headlines',
-    source: 'Commodities Desk',
-    published_at: new Date().toISOString(),
-    sentiment_label: 'POSITIVE',
-    confidence: 0.66,
-  },
-]
+import { getDashboard, getStocks, refreshStock } from '@/lib/api'
+import type { DashboardData, NewsItem, Stock } from '@/lib/types'
 
 export default function Home() {
-  const [selectedTicker, setSelectedTicker] = useState('TSLA')
-  const [trackedTicker, setTrackedTicker] = useState('TSLA')
+  const [stocks, setStocks] = useState<Stock[]>([])
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
+  const [trackedTicker, setTrackedTicker] = useState<string | null>(null)
   const [period, setPeriod] = useState(90)
   const [data, setData] = useState<DashboardData | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isAddStockOpen, setIsAddStockOpen] = useState(false)
   const [selectedHeadline, setSelectedHeadline] = useState<NewsItem | null>(null)
 
+  // Get active tickers from stocks
   const tickers = useMemo(() => {
-    const set = new Set(DEFAULT_TICKERS)
-    if (selectedTicker) set.add(selectedTicker)
-    return Array.from(set).sort((a, b) => a.localeCompare(b))
-  }, [selectedTicker])
+    return stocks.filter((s) => s.is_active).map((s) => s.ticker).sort()
+  }, [stocks])
 
   const lastUpdated = useMemo(() => {
     const value = data?.daily_data.at(-1)?.date
@@ -66,40 +37,61 @@ export default function Home() {
     return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(parsed)
   }, [data])
 
+  // Fetch stocks on mount
   useEffect(() => {
     let isMounted = true
-    const fetchDashboard = async () => {
-      setIsLoading(true)
-      setError(null)
+    const fetchStockList = async () => {
       try {
-        const response = await getDashboard(selectedTicker, period)
-        if (isMounted) setData(response)
-      } catch (err) {
-        if (isMounted) {
-          setError(err instanceof Error ? err.message : 'Failed to load dashboard.')
+        const stockList = await getStocks()
+        if (isMounted && stockList.length > 0) {
+          setStocks(stockList)
+          const activeTickers = stockList.filter((s) => s.is_active).map((s) => s.ticker)
+          if (activeTickers.length > 0 && !selectedTicker) {
+            setSelectedTicker(activeTickers[0])
+            setTrackedTicker(activeTickers[0])
+          }
         }
-      } finally {
-        if (isMounted) setIsLoading(false)
+      } catch (err) {
+        console.error('Failed to fetch stocks:', err)
       }
     }
+    fetchStockList()
+    return () => { isMounted = false }
+  }, [])
 
-    fetchDashboard()
-    return () => {
-      isMounted = false
-    }
-  }, [selectedTicker, period])
-
-  const handleRefresh = async () => {
+  // Fetch dashboard when ticker or period changes
+  const fetchDashboard = useCallback(async () => {
+    if (!selectedTicker) return
     setIsLoading(true)
     setError(null)
     try {
-      await refreshStock(selectedTicker)
       const response = await getDashboard(selectedTicker, period)
       setData(response)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to refresh ticker.')
+      setError(err instanceof Error ? err.message : 'Failed to load dashboard.')
     } finally {
       setIsLoading(false)
+    }
+  }, [selectedTicker, period])
+
+  useEffect(() => {
+    fetchDashboard()
+  }, [fetchDashboard])
+
+  const handleRefresh = async () => {
+    if (!selectedTicker) return
+    setIsRefreshing(true)
+    setError(null)
+    try {
+      await refreshStock(selectedTicker)
+      // Re-fetch after 10 seconds to allow backend to process
+      setTimeout(() => {
+        fetchDashboard()
+        setIsRefreshing(false)
+      }, 10000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to refresh ticker.')
+      setIsRefreshing(false)
     }
   }
 
@@ -110,7 +102,7 @@ export default function Home() {
   return (
     <>
       <AppShell
-        ticker={selectedTicker}
+        ticker={selectedTicker ?? ''}
         tickers={tickers}
         period={period}
         onTickerChange={setSelectedTicker}
@@ -121,7 +113,10 @@ export default function Home() {
       >
         <Stack spacing={{ xs: 4, md: 5 }}>
           {error && <Alert severity="error">{error}</Alert>}
-          {!data && !isLoading && !error && (
+          {isRefreshing && (
+            <Alert severity="info">Refreshing data... This may take a few seconds.</Alert>
+          )}
+          {!data && !isLoading && !error && !isRefreshing && (
             <Alert severity="info">No data yet. Click Refresh.</Alert>
           )}
 
@@ -166,7 +161,7 @@ export default function Home() {
             <Grid container spacing={3} alignItems="stretch">
               <Grid size={{ xs: 12, md: 4 }}>
                 <SentimentPanel
-                  ticker={selectedTicker}
+                  ticker={selectedTicker ?? ''}
                   sentimentScore={sentimentScore}
                   priceReturn={priceReturn}
                   tags={[
@@ -181,9 +176,9 @@ export default function Home() {
                 <AlignmentPanel
                   tickers={tickers}
                   statusText={
-                    error ? 'API unavailable.' : data ? 'Ready' : 'Loading data...'
+                    isRefreshing ? 'Refreshing...' : error ? 'API unavailable.' : data ? 'Ready' : 'Loading data...'
                   }
-                  selectedTicker={trackedTicker}
+                  selectedTicker={trackedTicker ?? ''}
                   selectedPrice={null}
                   selectedSentiment={sentimentScore}
                   onSelectTicker={setTrackedTicker}
@@ -216,10 +211,7 @@ export default function Home() {
               </Grid>
               <Grid size={{ xs: 12, md: 8 }}>
                 <HeadlinesPanel
-                  headlines={SAMPLE_HEADLINES.map((headline) => ({
-                    ...headline,
-                    title: `[${trackedTicker}] ${headline.title}`,
-                  }))}
+                  headlines={data?.headlines ?? []}
                   isLoading={isLoading}
                   onSelectHeadline={setSelectedHeadline}
                 />

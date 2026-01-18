@@ -2,10 +2,16 @@
 import re
 import json
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from schemas import AddStockRequest, RefreshStockRequest, TaskResponse
-from db import execute, execute_returning, is_configured
+from db import execute, execute_returning, query, is_configured
 
 router = APIRouter()
+
+
+class Stock(BaseModel):
+    ticker: str
+    is_active: bool
 
 # Payload parameters for REFRESH_STOCK
 REFRESH_PAYLOAD = {
@@ -24,6 +30,18 @@ def validate_ticker(ticker: str) -> str:
     if not re.match(r'^[A-Z0-9]{1,6}$', ticker):
         raise HTTPException(status_code=400, detail="Ticker must be 1-6 alphanumeric characters")
     return ticker
+
+
+@router.get("/api/stocks", response_model=list[Stock])
+@router.get("/stocks", response_model=list[Stock], include_in_schema=False)
+def get_stocks():
+    """Get all tracked stocks."""
+    if not is_configured():
+        # Return default tickers when DB not configured
+        return [Stock(ticker=t, is_active=True) for t in ["TSLA", "NVDA", "JPM", "PFE", "GME"]]
+
+    rows = query("SELECT ticker, is_active FROM tracked_stocks ORDER BY ticker")
+    return [Stock(ticker=r["ticker"], is_active=r["is_active"]) for r in rows]
 
 
 @router.post("/api/stocks", response_model=TaskResponse)
