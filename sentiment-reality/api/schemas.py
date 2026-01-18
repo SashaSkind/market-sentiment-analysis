@@ -85,6 +85,16 @@ class NewsItem(BaseModel):
     url: Optional[str] = None
 
 
+# ========== Coverage ==========
+class Coverage(BaseModel):
+    sentiment_days_available: int
+    sentiment_period_requested: int
+    sentiment_period_used: int
+    coverage_start: Optional[str] = None
+    coverage_end: Optional[str] = None
+
+
 # ========== Extended Dashboard (with headlines) ==========
 class DashboardDataWithHeadlines(DashboardData):
     headlines: list[NewsItem] = []
+    coverage: Optional[Coverage] = None

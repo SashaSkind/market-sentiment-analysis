@@ -3,7 +3,7 @@ from fastapi import APIRouter, Query
 from datetime import date, timedelta
 from schemas import (
     DashboardData, DashboardDataWithHeadlines, DailyDataPoint, PricePoint, DailySentiment,
-    WindowMetric, SentimentSummary, PriceSummary, AlignmentSummary, NewsItem
+    WindowMetric, SentimentSummary, PriceSummary, AlignmentSummary, NewsItem, Coverage
 )
 
 router = APIRouter()
@@ -136,6 +136,7 @@ def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
         sentiment_summary = _compute_sentiment_summary(sentiments)
         price_summary = _compute_price_summary(prices)
         alignment_summary = _compute_alignment_summary(metrics)
+        coverage = _compute_coverage(ticker, period)
 
         return DashboardDataWithHeadlines(
             ticker=ticker,
@@ -145,6 +146,7 @@ def get_dashboard(ticker: str = Query("TSLA"), period: int = Query(90)):
             alignment=alignment_summary,
             daily_data=daily_data,
             headlines=headlines,
+            coverage=coverage,
         )
 
     except Exception as e:
@@ -160,8 +162,8 @@ def _compute_sentiment_summary(sentiments: list) -> SentimentSummary:
     if not sentiments:
         return SentimentSummary()
 
-    latest = sentiments[-1]
-    current_score = latest["sentiment_avg"]
+    # Use period average instead of just latest day
+    current_score = sum(s["sentiment_avg"] for s in sentiments) / len(sentiments)
 
     # Compute trend (compare last 3 days if available)
     if len(sentiments) >= 3:
@@ -222,6 +224,28 @@ def _compute_alignment_summary(metrics: list) -> AlignmentSummary:
         score=latest.get("alignment_score"),
         misalignment_days=latest.get("misalignment_days"),
         interpretation=latest.get("interpretation")
+    )
+
+
+def _compute_coverage(ticker: str, period: int) -> Coverage:
+    """Compute sentiment coverage for requested period."""
+    start_date = date.today() - timedelta(days=period)
+
+    result = query("""
+        SELECT COUNT(*) as count, MIN(date) as min_date, MAX(date) as max_date
+        FROM daily_agg
+        WHERE ticker = %s AND date >= %s
+    """, (ticker, start_date))
+
+    row = result[0] if result else {}
+    days_available = row.get("count", 0) or 0
+
+    return Coverage(
+        sentiment_days_available=days_available,
+        sentiment_period_requested=period,
+        sentiment_period_used=min(period, days_available),
+        coverage_start=str(row["min_date"]) if row.get("min_date") else None,
+        coverage_end=str(row["max_date"]) if row.get("max_date") else None,
     )
 
 
